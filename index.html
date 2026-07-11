@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Antier Solutions - Claude Utilization Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  :root {
+    --bg: #0B1220;
+    --panel: #131B2C;
+    --border: #223049;
+    --text: #E5E7EB;
+    --muted: #8B95A7;
+    --accent: #2DD4BF;
+    --warn: #F59E0B;
+    --good: #34D399;
+    --bad: #F87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    padding: 32px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .status-line { font-size: 12px; color: var(--muted); margin-bottom: 24px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .kpi {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .kpi .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .kpi .value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 14px; font-weight: 600; margin: 0 0 16px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  td.num { text-align: right; }
+  .badge { padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(52,211,153,0.15); color: var(--good); }
+  .badge.review { background: rgba(245,158,11,0.15); color: var(--warn); }
+  .badge.error, .badge.no_key { background: rgba(248,113,113,0.15); color: var(--bad); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--good); }
+  .dot.stale { background: var(--warn); }
+  .dot.off { background: var(--bad); }
+</style>
+</head>
+<body>
+
+  <h1>Antier Solutions - Claude Utilization</h1>
+  <p class="sub">Refreshes automatically every hour (data updated by GitHub Actions)</p>
+  <p class="status-line"><span class="dot off" id="statusDot"></span><span id="statusText">Loading...</span></p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="label">Total tokens (7d)</div><div class="value" id="kpiTokens">--</div></div>
+    <div class="kpi"><div class="label">Total cost (7d)</div><div class="value" id="kpiCost">--</div></div>
+    <div class="kpi"><div class="label">Active orgs</div><div class="value" id="kpiOrgs">--</div></div>
+    <div class="kpi"><div class="label">Top spend org</div><div class="value" id="kpiTop" style="font-size:18px;">--</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Cost by organization (USD)</h2>
+    <div style="position:relative; height:260px;">
+      <canvas id="costChart"></canvas>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Organization breakdown</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Organization</th>
+          <th class="num">Tokens</th>
+          <th class="num">Cost (USD)</th>
+          <th class="num">Status</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="4" style="color:var(--muted);">Loading data.json...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<script>
+let chart = null;
+const REFRESH_MS = 5 * 60 * 1000;
+
+function setStatus(state, text) {
+  const dot = document.getElementById('statusDot');
+  const label = document.getElementById('statusText');
+  dot.className = 'dot' + (state === 'live' ? '' : state === 'stale' ? ' stale' : ' off');
+  label.textContent = text;
+}
+
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+async function fetchData() {
+  try {
+    setStatus('stale', 'Refreshing...');
+    const res = await fetch('./data.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    render(data);
+    const when = data.generated_at ? new Date(data.generated_at).toLocaleString() : 'never (Action has not run yet)';
+    setStatus('live', 'Data last generated: ' + when);
+  } catch (err) {
+    setStatus('off', 'Could not load data.json: ' + err.message);
+  }
+}
+
+function render(data) {
+  const orgs = data.organizations || [];
+
+  document.getElementById('kpiTokens').textContent = fmtTokens(data.total_tokens || 0);
+  document.getElementById('kpiCost').textContent = '$' + (data.total_cost || 0).toLocaleString();
+  document.getElementById('kpiOrgs').textContent = orgs.filter(o => o.status !== 'no_key' && o.status !== 'error').length + ' / ' + orgs.length;
+
+  const top = orgs.slice().sort((a, b) => b.cost - a.cost)[0];
+  document.getElementById('kpiTop').textContent = top ? top.name : '--';
+
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+  orgs.forEach(o => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + o.name + '</td>' +
+      '<td class="num">' + fmtTokens(o.tokens) + '</td>' +
+      '<td class="num">$' + (o.cost || 0).toLocaleString() + '</td>' +
+      '<td class="num"><span class="badge ' + o.status + '">' + o.status.replace('_', ' ') + '</span></td>';
+    tbody.appendChild(tr);
+  });
+
+  const ctx = document.getElementById('costChart');
+  const labels = orgs.map(o => o.name.length > 18 ? o.name.slice(0, 17) + '…' : o.name);
+  const values = orgs.map(o => o.cost || 0);
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
+    chart.update();
+  } else {
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: 'Cost (USD)', data: values, backgroundColor: '#2DD4BF', borderRadius: 4, maxBarThickness: 32 }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, grid: { color: '#223049' }, ticks: { color: '#8B95A7', callback: v => '$' + v } },
+          x: { grid: { display: false }, ticks: { color: '#8B95A7' } }
+        }
+      }
+    });
+  }
+}
+
+fetchData();
+setInterval(fetchData, REFRESH_MS);
+</script>
+</body>
+</html>
